@@ -4,6 +4,7 @@ MinIter <- .01
 Toler <- MinIter / 2
 
 GetPmtDts <- function(ChgDt, NumMths, PmtDay){
+  ChgDt <- as.Date(ChgDt, '%m/%d/%Y')
   FirstPmtDt  <- mdy(paste(month(ChgDt) + 1,PmtDay,year(ChgDt), sep = '/'))
   as.Date(FirstPmtDt %m+% months(1:NumMths - 1))
 }
@@ -77,7 +78,7 @@ GetPmt <- function(Chg, Int, PmtDay, ChgDt, NumMths){
 ProjPmt <- function(Chg, Int, PmtDay, ChgDt, Pmt){
   FirstPmtDt  <- as.Date(mdy(paste(month(ChgDt) + 1,PmtDay,year(ChgDt), sep = '/')))
 #  i <- Int/36500
-  Proj <- data.frame(Dates = ChgDt, Chg = Chg, Interest = 0, Payment = 0, Balance = Chg)
+  Proj <- data.frame(Date = ChgDt, Chg = Chg, Interest = 0, Payment = 0, Balance = Chg)
   i <- 0
   pridate <- FirstPmtDt
   pribal <- Chg
@@ -86,11 +87,12 @@ ProjPmt <- function(Chg, Int, PmtDay, ChgDt, Pmt){
     days <- as.numeric(date - pridate)
     int <- round(GetIntFactor(Int, pridate, date) * Proj$Balance[nrow(Proj)], 2)
     bal <- max(pribal + int - Pmt, 0)
-    Proj <- rbind(Proj, data.frame(Dates = date,  Chg = 0, Interest = int, Payment = min(Pmt, pribal + int), Balance = bal))
+    Proj <- rbind(Proj, data.frame(Date = date,  Chg = 0, Interest = int, Payment = min(Pmt, pribal + int), Balance = bal))
     pribal <- bal
     pridate <- date
     i <- i + 1
   }
+  attr(Proj, 'IsProj') <- TRUE
   return(Proj)
 }
 
@@ -113,7 +115,6 @@ CalcIntRate <- function(Chg, Pmt, PmtDay, ChgDt, NumMths){
     RawDiff <- FinalBal[iter - 1] * (int[iter - 1] - int[iter - 2]) / (FinalBal[iter - 2] - FinalBal[iter - 1])
     int <- append(int, round(int[iter - 1] + max(abs(RawDiff), MinIter) * RawDiff / abs(RawDiff), 2))
     Int <- list(Date = as.Date('1/1/1970', format = '%m/%d/%Y'), Rate = int[iter])
-    browser()
     bals <- append(bals, list(GetBals(Chg, GetIntFacts(Int, c(ChgDt, PmtDts)), Int)))
     FinalBal <- append(FinalBal, bals[[iter]][length(idays) + 1])
     if(sum(int[iter] == int[-c(1:2)]) != 1) break
@@ -122,8 +123,49 @@ CalcIntRate <- function(Chg, Pmt, PmtDay, ChgDt, NumMths){
   return(Summ)
 }
 
-MergeProjs <- function(){
-  
+AddProj <- function(Proj1, Proj2){
+  if(attr(Proj1, 'IsProj') && attr(Proj2, 'IsProj')){
+    CombDates <- unique(c(Proj1$Date, Proj2$Date))
+    CombDates <- CombDates[order(CombDates)]
+    out <- do.call(rbind, lapply(CombDates, FUN = function(x) AddEntries(x, Proj1, Proj2)))
+    out$Balance <- round(cumsum(out$Chg + out$Interest - out$Payment), 2)
+    attr(out, 'IsProj') <- TRUE
+    return(out)
+  }else stop("Need data frame of type 'Proj'")
+}
+
+GetPriorEntry <- function(Date, Proj){
+  if(attr(Proj, 'IsProj')){
+    if(Date < min(Proj$Date)) return(NULL)
+    else Proj[Proj$Date == max(Proj[Proj$Date < Date, 'Date']), ]
+  } else stop("Need data frame of type 'Proj'")
+}
+
+GetNextEntry <- function(Date, Proj){
+  if(attr(Proj, 'IsProj')){
+    if(Date > max(Proj$Date)) return(NULL)
+    else Proj[Proj$Date == min(Proj[Proj$Date >= Date, 'Date']), ]
+  } else stop("Need data frame of type 'Proj'")
+}
+
+AddEntries <- function(Date, Proj1, Proj2){
+  if(attr(Proj1, 'IsProj') && attr(Proj2, 'IsProj')){
+    Entry1 <- Proj1[Proj1$Date == Date, ]
+    Entry2 <- Proj2[Proj2$Date == Date, ]
+    Payment <- ifelse(nrow(Entry1) == 0, 0, Entry1$Payment) + ifelse(nrow(Entry2) == 0, 0, Entry2$Payment)
+    Chg <- ifelse(nrow(Entry1) == 0, 0, Entry1$Chg) + ifelse(nrow(Entry2) == 0, 0, Entry2$Chg)
+    Prior1 <- GetPriorEntry(Date, Proj1)
+    Prior2 <- GetPriorEntry(Date, Proj2)
+    Next1 <- GetNextEntry(Date, Proj1)
+    Next2 <- GetNextEntry(Date, Proj2)
+    Int1 <- ifelse(is.null(Next1) || is.null(Prior1), 0, Next1$Interest * as.numeric(Date - Prior1$Date) / as.numeric(Next1$Date - Prior1$Date))
+    Int2 <- ifelse(is.null(Next2) || is.null(Prior2), 0, Next2$Interest * as.numeric(Date - Prior2$Date) / as.numeric(Next2$Date - Prior2$Date))
+    Interest <-  round(ifelse(is.na(Int1), 0, Int1) + ifelse(is.na(Int2), 0, Int2), 2)
+    data.frame(Date = Date, Chg = Chg, Interest = Interest, Payment = Payment, Balance = 0)
+  }else stop("Need data frame of type 'Proj'")
 }
 
 
+MergeProjs <- function(Projs){
+  Reduce(AddProj, Projs)
+}
